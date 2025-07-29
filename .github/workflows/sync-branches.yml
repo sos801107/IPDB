@@ -99,53 +99,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 发送通知
-        if: always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const success = "${{ steps.sync-branches.outputs.success_branches }}".split(' ').filter(Boolean);
-            const failed = "${{ steps.sync-branches.outputs.failed_branches }}".split(' ').filter(Boolean);
-            const conflicts = "${{ steps.sync-branches.outputs.conflict_branches }}".split(' ').filter(Boolean);
-            
-            let conflictLinks = {};
-            conflicts.forEach(item => {
-              const [branch, url] = item.split(':');
-              conflictLinks[branch] = url;
-            });
-            
-            // 创建总结报告
-            const report = `
-            ## 上游同步报告
-            **仓库:** ${context.repo.owner}/${context.repo.repo}
-            **上游仓库:** ${process.env.UPSTREAM_REPO}
-            **执行时间:** ${new Date().toISOString()}
-            
-            ### 同步结果:
-            ✅ **成功分支:** ${success.length > 0 ? success.join(', ') : '无'}
-            ❌ **失败分支:** ${failed.length > 0 ? failed.join(', ') : '无'}
-            
-            ${failed.length > 0 ? '### 冲突解决 PR:\n' + failed.map(b => `- [${b}](${conflictLinks[b]})`).join('\n') : ''}
-            `;
-            
-            // 创建Issue报告
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `上游同步报告 - ${new Date().toLocaleDateString()}`,
-              body: report,
-              labels: ['sync-report']
-            });
-            
-            // 发送仓库通知
-            await github.rest.repos.createCommitComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              commit_sha: context.sha,
-              body: report
-            });
-        env:
-          UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
 
       - name: Slack 通知
         if: ${{ steps.sync-branches.outputs.failed_branches != '' }}
