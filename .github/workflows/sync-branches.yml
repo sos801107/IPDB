@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        branches: ['main', 'dev', 'release']  # 需要同步的分支列表
+        branches: ['main']  # 需要同步的分支列表
     permissions:
       contents: write  # 需要写权限推送分支
       
@@ -28,7 +28,7 @@ jobs:
           git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git
           git fetch upstream --prune
         env:
-          UPSTREAM_REPO: original-owner/original-repo  # 替换为真实上游仓库
+          UPSTREAM_REPO: ymyuuu/IPDB  # 替换为真实上游仓库
 
       - name: 尝试同步分支
         id: sync
