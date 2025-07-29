@@ -1,89 +1,90 @@
-name: Sync Branches
+name: Sync Remote Branches
 
 on:
-  push:
-    branches:
-      - main  # 当 main 分支有更新时触发
   schedule:
-    - cron: '0 * * * *'  # 每小时自动同步一次（可选）
-  workflow_dispatch:  # 支持手动触发
+    - cron: '0 */6 * * *'  # 每6小时同步一次
+  workflow_dispatch:        # 支持手动触发
+  repository_dispatch:      # 支持API触发
+    types: [sync-requested]
 
 jobs:
-  sync-branches:
+  sync-remote:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        branches: ['main', 'dev', 'release']  # 需要同步的分支列表
     permissions:
       contents: write  # 需要写权限推送分支
       
     steps:
-      - name: 检出仓库
+      - name: 检出当前仓库
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # 获取完整历史
-          ref: main       # 从 main 分支检出
+          ref: ${{ matrix.branches }}
+          fetch-depth: 0
 
-      - name: 设置 Git 配置
+      - name: 添加上游仓库
         run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
+          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git
+          git fetch upstream --prune
+        env:
+          UPSTREAM_REPO: original-owner/original-repo  # 替换为真实上游仓库
 
-      - name: 尝试同步到 dev 分支
+      - name: 尝试同步分支
         id: sync
         run: |
-          # 尝试合并 main 到 dev
-          git fetch origin dev:dev
-          git checkout -B dev origin/dev
-          
-          # 尝试合并（忽略合并策略）
-          if git merge --no-commit --no-ff origin/main; then
+          # 尝试合并上游分支
+          git checkout ${{ matrix.branches }}
+          if git merge --no-commit --no-ff upstream/${{ matrix.branches }}; then
             echo "status=success" >> $GITHUB_OUTPUT
           else
             # 处理冲突
             git merge --abort
             echo "status=conflict" >> $GITHUB_OUTPUT
-            echo "冲突文件:"
-            git diff --name-only --diff-filter=U
+            echo "conflict_files=$(git diff --name-only --diff-filter=U | tr '\n' ',')" >> $GITHUB_OUTPUT
           fi
 
       - name: 推送更新
         if: steps.sync.outputs.status == 'success'
         run: |
-          git commit -m "自动同步: main → dev [跳过CI]"
-          git push origin dev
+          git config user.name "GitHub Sync Bot"
+          git config user.email "actions@github.com"
+          git commit -m "🔁 自动同步上游分支: ${{ matrix.branches }} [skip ci]"
+          git push origin ${{ matrix.branches }}
 
-      - name: 冲突通知
+      - name: 冲突处理
         if: steps.sync.outputs.status == 'conflict'
         uses: actions/github-script@v7
         with:
           script: |
-            const { data } = await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.payload.pull_request?.number || 0,
-              body: `⚠️ 分支同步冲突！\n` +
-                    `无法自动合并 main 到 dev\n` +
-                    `请手动解决冲突: ${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/compare/dev...main`
-            })
-            // 创建问题通知
+            const branch = '${{ matrix.branches }}';
+            const conflictFiles = '${{ steps.sync.outputs.conflict_files }}'.split(',');
+            
+            // 创建冲突报告issue
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: '分支同步冲突',
-              body: `检测到 main → dev 同步冲突\n\n` +
-                    `**冲突文件**:\n\`\`\`\n${process.env.CONFLICT_FILES}\n\`\`\`\n` +
-                    `[点击解决冲突](${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/compare/dev...main)`,
-              labels: ['automation', 'conflict']
-            })
-        env:
-          CONFLICT_FILES: ${{ steps.sync.outputs.conflict_files }}
+              title: `分支同步冲突: ${branch}`,
+              body: `⚠️ 无法自动同步分支 ${branch}\n\n` +
+                     `**冲突文件**:\n${conflictFiles.map(f => `- ${f}`).join('\n')}\n\n` +
+                     `[点击解决冲突](${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/compare/${branch}...upstream/${branch})`,
+              labels: ['sync-conflict']
+            });
+            
+            // 添加分支保护注释
+            await github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: context.sha,
+              body: `分支同步失败！存在冲突需要手动解决。`
+            });
 
-      - name: Slack 通知
+      - name: 发送通知
         if: always()
-        uses: slackapi/slack-github-action@v1.24.0
+        uses: actions-slack@v3
         with:
-          channel-id: 'C123456'  # 替换为真实频道ID
-          slack-message: |
-            ${{ steps.sync.outputs.status == 'success' && '✅ 分支同步成功' || '❌ 分支同步冲突' }}
-            仓库: ${{ github.repository }}
-            详情: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          status: ${{ steps.sync.outputs.status }}
+          fields: repo,branch,status
         env:
-          SLACK_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
