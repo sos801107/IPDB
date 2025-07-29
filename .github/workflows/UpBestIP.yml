@@ -11,6 +11,8 @@ on:
       - "BestGC/bestgcv6.txt"      # 监听 BestGC/bestgcv6.txt 文件的更新
       - "BestAli/bestaliv4.txt"      # 监听 BestGC/bestgcv6.txt 文件的更新
   workflow_dispatch:             # 支持手动触发
+  schedule:
+    - cron: '0 */1 * * *'
 
 jobs:
   UpBestIP:
