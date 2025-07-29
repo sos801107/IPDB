@@ -18,7 +18,7 @@ jobs:
       
     steps:
       - name: 检出当前仓库
-        uses: sos801107/IPDB@v4
+        uses: actions/checkout@v4 
         with:
           ref: ${{ matrix.branches }}
           fetch-depth: 0
@@ -27,7 +27,6 @@ jobs:
         run: |
           git remote add upstream https://github.com/ymyuuu/IPDB.git
           git fetch upstream --prune
-
 
       - name: 尝试同步分支
         id: sync
