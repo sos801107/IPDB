@@ -1,88 +1,162 @@
-name: Sync Remote Branches
+name: Sync Upstream Repository
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # 每6小时同步一次
-  workflow_dispatch:        # 支持手动触发
-  repository_dispatch:      # 支持API触发
+    - cron: '0 0 * * *'  # 每天 UTC 午夜同步一次
+  workflow_dispatch:      # 支持手动触发
+  repository_dispatch:    # 支持API触发
     types: [sync-requested]
 
 jobs:
-  sync-remote:
+  sync-upstream:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        branches: ['main']  # 需要同步的分支列表
     permissions:
       contents: write  # 需要写权限推送分支
-      
+      pull-requests: write
+      issues: write
+
     steps:
       - name: 检出当前仓库
-        uses: actions/checkout@v4 
+        uses: actions/checkout@v4
         with:
-          ref: ${{ matrix.branches }}
-          fetch-depth: 0
+          fetch-depth: 0  # 获取完整历史
+
+      - name: 配置 Git 身份
+        run: |
+          git config user.name "GitHub Upstream Sync Bot"
+          git config user.email "actions@github.com"
 
       - name: 添加上游仓库
         run: |
-          git remote add upstream https://github.com/ymyuuu/IPDB.git
+          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git
           git fetch upstream --prune
+        env:
+          UPSTREAM_REPO: "ymyuuu/IPDB"  # 替换为真实上游仓库
 
-      - name: 尝试同步分支
-        id: sync
+      - name: 获取需要同步的分支
+        id: get-branches
         run: |
-          # 尝试合并上游分支
-          git checkout ${{ matrix.branches }}
-          if git merge --no-commit --no-ff upstream/${{ matrix.branches }}; then
-            echo "status=success" >> $GITHUB_OUTPUT
-          else
-            # 处理冲突
-            git merge --abort
-            echo "status=conflict" >> $GITHUB_OUTPUT
-            echo "conflict_files=$(git diff --name-only --diff-filter=U | tr '\n' ',')" >> $GITHUB_OUTPUT
-          fi
+          # 获取上游所有分支
+          UPSTREAM_BRANCHES=$(git ls-remote --heads upstream | awk '{print $2}' | sed 's/refs\/heads\///')
+          
+          # 获取当前仓库分支
+          CURRENT_BRANCHES=$(git branch -r | grep -v 'HEAD' | sed 's/origin\///')
+          
+          # 找出需要同步的分支（上游存在且当前仓库也存在）
+          SYNC_BRANCHES=$(comm -12 <(echo "$UPSTREAM_BRANCHES" | sort) <(echo "$CURRENT_BRANCHES" | sort) | tr '\n' ' ')
+          
+          echo "需要同步的分支: $SYNC_BRANCHES"
+          echo "sync_branches=$SYNC_BRANCHES" >> $GITHUB_OUTPUT
+        shell: bash
 
-      - name: 推送更新
-        if: steps.sync.outputs.status == 'success'
+      - name: 同步分支
+        id: sync-branches
         run: |
-          git config user.name "GitHub Sync Bot"
-          git config user.email "actions@github.com"
-          git commit -m "🔁 自动同步上游分支: ${{ matrix.branches }} [skip ci]"
-          git push origin ${{ matrix.branches }}
+          # 将分支列表转换为数组
+          IFS=' ' read -ra BRANCHES <<< "${{ steps.get-branches.outputs.sync_branches }}"
+          
+          # 初始化结果变量
+          SUCCESS_BRANCHES=""
+          FAILED_BRANCHES=""
+          CONFLICT_BRANCHES=""
+          
+          for branch in "${BRANCHES[@]}"; do
+            echo "正在同步分支: $branch"
+            
+            # 检出分支
+            git checkout -B $branch origin/$branch
+            
+            # 尝试合并上游更改
+            if git merge --no-commit --no-ff upstream/$branch; then
+              git commit -m "🔁 自动同步上游更改: $branch [skip ci]"
+              git push origin $branch
+              SUCCESS_BRANCHES+="$branch "
+              echo "✅ $branch 同步成功"
+            else
+              # 处理冲突
+              git merge --abort
+              
+              # 创建冲突解决分支
+              CONFLICT_BRANCH="sync-conflict-$branch-$(date +%s)"
+              git checkout -b $CONFLICT_BRANCH
+              git push origin $CONFLICT_BRANCH
+              
+              # 创建PR
+              PR_URL=$(gh pr create --base $branch --head $CONFLICT_BRANCH \
+                --title "解决上游同步冲突: $branch" \
+                --body "上游同步时检测到冲突，请手动解决。\n\n冲突文件:\n$(git diff --name-only --diff-filter=U)")
+              
+              FAILED_BRANCHES+="$branch "
+              CONFLICT_BRANCHES+="$branch:$PR_URL "
+              echo "❌ $branch 同步失败，创建冲突解决PR: $PR_URL"
+            fi
+          done
+          
+          # 设置输出变量
+          echo "success_branches=$SUCCESS_BRANCHES" >> $GITHUB_OUTPUT
+          echo "failed_branches=$FAILED_BRANCHES" >> $GITHUB_OUTPUT
+          echo "conflict_branches=$CONFLICT_BRANCHES" >> $GITHUB_OUTPUT
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 冲突处理
-        if: steps.sync.outputs.status == 'conflict'
+      - name: 发送通知
+        if: always()
         uses: actions/github-script@v7
         with:
           script: |
-            const branch = '${{ matrix.branches }}';
-            const conflictFiles = '${{ steps.sync.outputs.conflict_files }}'.split(',');
+            const success = "${{ steps.sync-branches.outputs.success_branches }}".split(' ').filter(Boolean);
+            const failed = "${{ steps.sync-branches.outputs.failed_branches }}".split(' ').filter(Boolean);
+            const conflicts = "${{ steps.sync-branches.outputs.conflict_branches }}".split(' ').filter(Boolean);
             
-            // 创建冲突报告issue
+            let conflictLinks = {};
+            conflicts.forEach(item => {
+              const [branch, url] = item.split(':');
+              conflictLinks[branch] = url;
+            });
+            
+            // 创建总结报告
+            const report = `
+            ## 上游同步报告
+            **仓库:** ${context.repo.owner}/${context.repo.repo}
+            **上游仓库:** ${process.env.UPSTREAM_REPO}
+            **执行时间:** ${new Date().toISOString()}
+            
+            ### 同步结果:
+            ✅ **成功分支:** ${success.length > 0 ? success.join(', ') : '无'}
+            ❌ **失败分支:** ${failed.length > 0 ? failed.join(', ') : '无'}
+            
+            ${failed.length > 0 ? '### 冲突解决 PR:\n' + failed.map(b => `- [${b}](${conflictLinks[b]})`).join('\n') : ''}
+            `;
+            
+            // 创建Issue报告
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `分支同步冲突: ${branch}`,
-              body: `⚠️ 无法自动同步分支 ${branch}\n\n` +
-                     `**冲突文件**:\n${conflictFiles.map(f => `- ${f}`).join('\n')}\n\n` +
-                     `[点击解决冲突](${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/compare/${branch}...upstream/${branch})`,
-              labels: ['sync-conflict']
+              title: `上游同步报告 - ${new Date().toLocaleDateString()}`,
+              body: report,
+              labels: ['sync-report']
             });
             
-            // 添加分支保护注释
+            // 发送仓库通知
             await github.rest.repos.createCommitComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               commit_sha: context.sha,
-              body: `分支同步失败！存在冲突需要手动解决。`
+              body: report
             });
-
-      - name: 发送通知
-        if: always()
-        uses: actions-slack@v3
-        with:
-          status: ${{ steps.sync.outputs.status }}
-          fields: repo,branch,status
         env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
+
+      - name: Slack 通知
+        if: ${{ steps.sync-branches.outputs.failed_branches != '' }}
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          channel-id: 'C123456'  # 替换为真实频道ID
+          slack-message: |
+            :arrows_counterclockwise: *上游同步报告*
+            ${{ github.repository }} → ${{ env.UPSTREAM_REPO }}
+            :white_check_mark: 成功分支: ${{ steps.sync-branches.outputs.success_branches || '无' }}
+            :x: 失败分支: ${{ steps.sync-branches.outputs.failed_branches || '无' }}
+            :warning: 冲突解决PR: ${{ steps.sync-branches.outputs.conflict_branches || '无' }}
+        env:
+          SLACK_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
