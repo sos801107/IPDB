@@ -18,7 +18,7 @@ jobs:
       
     steps:
       - name: 检出当前仓库
-        uses: actions/checkout@v4
+        uses: sos801107/IPDB@v4
         with:
           ref: ${{ matrix.branches }}
           fetch-depth: 0
